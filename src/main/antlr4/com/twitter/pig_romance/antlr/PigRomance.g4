@@ -55,6 +55,7 @@ NEG : '-';
 POW : '^';
 AND : '&&' | A N D;
 OR : '||' | O R;
+NOT : '!' | N O T;
 
 LETTER : [a-zA-Z];
 DIGIT  : [0-9];
@@ -66,6 +67,7 @@ AS : A S;
 USING : U S I N G;
 REGISTER : R E G I S T E R;
 GLOBAL : G L O B A L;
+MATCHES : M A T C H E S;
 
 TYPE_INT : I N T;
 TYPE_LONG : L O N G;
@@ -171,12 +173,16 @@ command_inner : foreach
 foreach : FOREACH nested_command GENERATE column_transformations
         ;
 
-column_transformations : column_transform ( COMMA column_transform )*
+column_transformations : column_expression ( COMMA column_expression )*
                        ;
+
+column_expression : column_transform
+                  | arithmetic_expression
+                  | boolean_expression
+                  ;
 
 column_transform : column_identifier schema?
                  | udf schema?
-                 | arithmetic_expression
                  ;
 
 column_identifier : identifier
@@ -193,13 +199,25 @@ arithmetic_expression : NEG arithmetic_expression
                       | arithmetic_expression DIV arithmetic_expression
                       | arithmetic_expression ADD arithmetic_expression
                       | arithmetic_expression NEG arithmetic_expression
-                      | number
-                      | column_identifier
+                      | column_transform
                       ;
 
+boolean_expression : NOT boolean_expression
+                   | LEFT_PAREN boolean_expression RIGHT_PAREN
+                   | boolean_expression AND boolean_expression
+                   | boolean_expression OR boolean_expression
+                   | column_transform
+                   | matches_expression
+                   ;
 
+matches_expression : column_identifier MATCHES regex
+                   ;
 
-udf : clazz
+//TODO need to refine this big time
+regex : QUOTE identifier QUOTE
+      ;
+
+udf : identifier ( DOT identifier )* LEFT_PAREN arguments RIGHT_PAREN
     ;
 
 clazz : identifier ( DOT identifier )* LEFT_PAREN arguments RIGHT_PAREN
