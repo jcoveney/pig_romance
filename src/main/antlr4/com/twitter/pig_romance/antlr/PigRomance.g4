@@ -253,13 +253,15 @@ column_expression : column_transform
                   | boolean_expression
                   | string_literal
                   | tuple
+                  | MULT
+                  // TODO need a range selector
                   ;
 
 tuple : LEFT_PAREN column_transformations RIGHT_PAREN
       ;
 
-column_transform : column_identifier schema?
-                 | udf schema?
+column_transform : column_identifier realias?
+                 | udf realias?
                  ;
 
 column_identifier : identifier
@@ -311,14 +313,16 @@ load_arguments : string_literal ( COMMA string_literal )*
 string_literal : QUOTE identifier QUOTE
                ;
 
-schema : AS LEFT_PAREN schema_fields RIGHT_PAREN
-       | AS schema_field
-       ;
+// In pig romance, ALL STATEMENTS MUST BE TYPED. UDFs and load funcs must be typed. So while realiasing is ok,
+// there should never be a need to explicitly retype something (use a typesafe cast for that!)
+realias : AS LEFT_PAREN realias_fields RIGHT_PAREN
+        | AS identifier
+        ;
 
-schema_fields : schema_field ( COMMA schema_field )*;
+realias_fields : identifier ( COMMA identifier )*;
 
-schema_field : identifier ( COLON type )?
-             ;
+/*
+Without casting, these shouldn't be necessary
 
 //TODO do we want to make types required for loads and such? either from the loader or the user?
 type : TYPE_INT
@@ -341,11 +345,12 @@ type_bag : TYPE_BAG ( LEFT_PAREN schema_fields RIGHT_PAREN )?
 //TODO think about the syntax we want
 type_map : TYPE_MAP ( LEFT_SQUARE schema_fields RIGHT_SQUARE )?
          ;
+*/
 /*
 command_outer : load
               ;
 */
-load : LOAD quoted_path using? schema?
+load : LOAD quoted_path using? realias?
      ;
 
 using : USING load_class
