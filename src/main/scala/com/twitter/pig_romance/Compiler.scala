@@ -118,6 +118,14 @@ class PigLogicalPlanBuilderListener extends PigRomanceBaseListener {
     //TODO is it possible to make it so we don't have to set the parent, and can set the nested_command node?
     lpProperty.set(ctx.getParent, scopes.getLastLp)
   }
+
+  override def exitNestedCommandIdentifier(ctx: PigRomanceParser.NestedCommandIdentifierContext) {
+    lpProperty.set(ctx.getParent, scopes.getLpForRelation(RelationIdentifier(ctx.identifier.IDENTIFIER.getText)))
+  }
+
+  override def exitNestedCommandInner(ctx: PigRomanceParser.NestedCommandInnerContext) {
+    lpProperty.set(ctx.getParent, lpProperty.get(ctx))
+  }
 }
 
 case class RelationIdentifier(id: String)
