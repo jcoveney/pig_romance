@@ -56,9 +56,11 @@ POW : '^';
 AND : '&&' | A N D;
 OR : '||' | O R;
 NOT : '!' | N O T;
-
-LETTER : [a-zA-Z];
-DIGIT  : [0-9];
+PREVIOUS_RELATION : '@';
+EXEC : E X E C;
+fragment NEWLINE : '\r'? '\n';
+LINE_COMMENT : '--' ~[\r\n]* NEWLINE -> channel(HIDDEN);
+BLOCK_COMMENT : '/*' .*? '*/' -> channel(HIDDEN);
 
 FOREACH : F O R E A C H;
 GENERATE : G E N E R A T E;
@@ -68,6 +70,21 @@ USING : U S I N G;
 REGISTER : R E G I S T E R;
 GLOBAL : G L O B A L;
 MATCHES : M A T C H E S;
+DISTINCT : D I S T I N C T;
+GROUP : G R O U P;
+COGROUP : C O G R O U P;
+JOIN : J O I N;
+DUMP : D U M P;
+ON : O N;
+BY : B Y;
+REPLICATED : QUOTE R E P L I C A T E D QUOTE;
+SKEWED : QUOTE S K E W E D QUOTE;
+MERGE : QUOTE M E R G E QUOTE;
+STORE : S T O R E;
+INTO : I N T O;
+
+TRUE : T R U E;
+FALSE : F A L S E;
 
 TYPE_INT : I N T;
 TYPE_LONG : L O N G;
@@ -84,21 +101,25 @@ HDFS_PREFIX : H D F S COLON SLASH SLASH;
 
 QUOTE : '\'';
 
+fragment LETTER : [a-zA-Z];
+fragment DIGIT  : [0-9];
+
+POSITIVE_INTEGER : DIGIT+;
+IDENTIFIER : LETTER ( LETTER | DIGIT | UNDERSCORE )*;
+
 WS : [ \t\r\n]+ -> skip;
 
 // PARSER
 
 //TODO it'd be nice if this stuff was in the lexer instead, but it's hard to get the precedence correct
-letter_digit : LETTER | DIGIT | UNDERSCORE
-             ;
-
-integer : NEG? DIGIT+
+integer : NEG? POSITIVE_INTEGER
         ;
 
-number : integer
-       ;
+number_literal : integer
+               ;
 
-identifier : LETTER letter_digit*
+//TODO consider getting rid of the parser rule and propagating the IDENTIFIER
+identifier : IDENTIFIER
            ;
 
 hdfs_schema : HDFS_PREFIX namenode?
@@ -119,36 +140,39 @@ path_piece : identifier
 absolute_path : SLASH relative_path
               ;
 
-path : FILE_SCHEMA absolute_path
-     | hdfs_schema absolute_path
-     | absolute_path
-     | relative_path
+path : FILE_SCHEMA absolute_path  # FilePath
+     | hdfs_schema absolute_path  # HdfsPath
+     | absolute_path              # AbsPath
+     | relative_path              # RelPath
      ;
 
 quoted_path : QUOTE path QUOTE
             ;
 
-start : (global_command? SEMICOLON)* EOF
+start : global_command* EOF
       ;
 
 //TODO perhaps command should be relation, since that's sort of what they are generating?
 relation : identifier EQUALS
          ;
 
-anywhere_command : relation? command_inner
-                 //| relation? command_outer
-                 | nested_block
+//TODO should we support dump and whatnot within nested_blocks? Probably
+anywhere_command : relation? command_inner SEMICOLON    # AnywhereCommandInner
+                 //| relation? command_outer SEMICOLON
+                 | nested_block                         # AnywhereNestedBlock
                  ;
 
 global_command : anywhere_command
-               | shell_command
+               | shell_command SEMICOLON
+               | execution_command SEMICOLON
                ;
 
 nested_block_command : anywhere_command
-                     | make_global
+                     | make_global SEMICOLON
                      ;
 
-nested_block : LEFT_BRACK (nested_block_command? SEMICOLON)* RIGHT_BRACK
+//TODO we shouldn't need a semicolon after a nested_block
+nested_block : LEFT_BRACK nested_block_command* RIGHT_BRACK
              ;
 
 make_global : GLOBAL identifier
@@ -158,17 +182,65 @@ make_global : GLOBAL identifier
 shell_command : register
               ;
 
+// These are shell commands that will force an execution immediately. Note that it is a critical objective
+// that when in script mode, we will scan the whole script and make sure that we keep around information that will
+// be useful to later executions so that we do not have to recalculate everything.
+execution_command : EXEC   # Exec
+                  | dump   # DumpExec
+                  | store  # StoreExec
+                  ;
+
 register : REGISTER quoted_path
          ;
 
-nested_command : LEFT_PAREN command_inner RIGHT_PAREN
-               | identifier
+nested_command : LEFT_PAREN command_inner RIGHT_PAREN  # NestedCommandInner
+               | identifier                            # NestedCommandIdentifier
+               | PREVIOUS_RELATION                     # NestedCommandPrevious
                ;
 
-command_inner : foreach
-              | identifier
-              | load
+command_inner : foreach     # CommandInnerForeach
+              | identifier  # CommandInnerIdentifier
+              | load        # CommandInnerLoad
+              | distinct    # CommandInnerDistinct
+              | group       # CommandInnerGroup
+              | join        # CommandInnerJoin
+              | cogroup     # CommandInnerCogroup
               ;
+
+distinct : DISTINCT nested_command
+         ;
+
+group : GROUP commands_by_key
+      ;
+
+join : JOIN commands_on_key
+     ;
+
+cogroup : COGROUP commands_on_key
+        ;
+
+dump : DUMP nested_command
+     ;
+
+store : STORE nested_command INTO quoted_path using?
+      ;
+
+commands_by_key : relations BY column_transformations
+                ;
+
+commands_on_key : relations ON column_transformations join_qualifier?
+                ;
+
+join_qualifier : USING join_optimizations
+               ;
+
+join_optimizations : REPLICATED
+                   | MERGE
+                   | SKEWED
+                   ;
+
+relations : nested_command ( COMMA nested_command )*
+          ;
 
 foreach : FOREACH nested_command GENERATE column_transformations
         ;
@@ -179,7 +251,12 @@ column_transformations : column_expression ( COMMA column_expression )*
 column_expression : column_transform
                   | arithmetic_expression
                   | boolean_expression
+                  | string_literal
+                  | tuple
                   ;
+
+tuple : LEFT_PAREN column_transformations RIGHT_PAREN
+      ;
 
 column_transform : column_identifier schema?
                  | udf schema?
@@ -200,6 +277,7 @@ arithmetic_expression : NEG arithmetic_expression
                       | arithmetic_expression ADD arithmetic_expression
                       | arithmetic_expression NEG arithmetic_expression
                       | column_transform
+                      | number_literal
                       ;
 
 boolean_expression : NOT boolean_expression
@@ -207,8 +285,12 @@ boolean_expression : NOT boolean_expression
                    | boolean_expression AND boolean_expression
                    | boolean_expression OR boolean_expression
                    | column_transform
+                   | boolean_literal
                    | matches_expression
                    ;
+
+boolean_literal : TRUE
+                | FALSE;
 
 matches_expression : column_identifier MATCHES regex
                    ;
@@ -217,16 +299,14 @@ matches_expression : column_identifier MATCHES regex
 regex : QUOTE identifier QUOTE
       ;
 
-udf : identifier ( DOT identifier )* LEFT_PAREN arguments RIGHT_PAREN
+udf : identifier ( DOT identifier )* LEFT_PAREN column_transformations RIGHT_PAREN
     ;
 
-clazz : identifier ( DOT identifier )* LEFT_PAREN arguments RIGHT_PAREN
-      ;
+load_class : identifier ( DOT identifier )* LEFT_PAREN load_arguments RIGHT_PAREN
+           ;
 
-
-arguments : string_literal ( COMMA string_literal )*
-          | identifier ( COMMA identifier )*
-          ;
+load_arguments : string_literal ( COMMA string_literal )*
+               ;
 
 string_literal : QUOTE identifier QUOTE
                ;
@@ -268,5 +348,5 @@ command_outer : load
 load : LOAD quoted_path using? schema?
      ;
 
-using : USING clazz
+using : USING load_class
       ;
