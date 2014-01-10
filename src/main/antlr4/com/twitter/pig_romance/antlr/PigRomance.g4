@@ -82,6 +82,7 @@ SKEWED : QUOTE S K E W E D QUOTE;
 MERGE : QUOTE M E R G E QUOTE;
 STORE : S T O R E;
 INTO : I N T O;
+DESCRIBE : D E S C R I B E;
 
 TRUE : T R U E;
 FALSE : F A L S E;
@@ -179,8 +180,12 @@ make_global : GLOBAL identifier
             ;
 
 //TODO IMPORTANT: need to decide how we want to deal with defines. Preprocessor? Or actual macro type thing?
-shell_command : register
+shell_command : register  # ShellRegister
+              | describe  # ShellDescribe
               ;
+
+describe : DESCRIBE nested_command
+         ;
 
 // These are shell commands that will force an execution immediately. Note that it is a critical objective
 // that when in script mode, we will scan the whole script and make sure that we keep around information that will
@@ -248,12 +253,12 @@ foreach : FOREACH nested_command GENERATE column_transformations
 column_transformations : column_expression ( COMMA column_expression )*
                        ;
 
-column_expression : column_transform
-                  | arithmetic_expression
-                  | boolean_expression
-                  | string_literal
-                  | tuple
-                  | MULT
+column_expression : column_transform       # ColumnExpressionTransform
+                  | arithmetic_expression  # ColumnExpressionArithmeticExpr
+                  | boolean_expression     # ColumnExpressionBooleanExpr
+                  | string_literal         # ColumnExpressionStringLit
+                  | tuple                  # ColumnExpressionTuple
+                  | MULT                   # ColumnExpressionStar
                   // TODO need a range selector
                   ;
 

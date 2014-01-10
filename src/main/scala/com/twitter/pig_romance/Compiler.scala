@@ -80,21 +80,25 @@ class ContextProperties {
   case class LP
   case class STR
   case class LOADER
+  case class COLUMNS
 
   val lp = LP()
   val str = STR()
   val loader = LOADER()
+  val columns = COLUMNS()
 
   class NodeMap[K, V]
 
-  implicit val si = new NodeMap[LP, ContextProperty[LogicalPlan]]
-  implicit val sd = new NodeMap[STR, ContextProperty[String]]
-  implicit val sb = new NodeMap[LOADER, ContextProperty[PigLoader]]
+  implicit val i1 = new NodeMap[LP, ContextProperty[LogicalPlan]]
+  implicit val i2 = new NodeMap[STR, ContextProperty[String]]
+  implicit val i3 = new NodeMap[LOADER, ContextProperty[PigLoader]]
+  implicit val i4 = new NodeMap[COLUMNS, ContextProperty[Vector[Column]]]
 
   val hm = HMap[NodeMap](
     lp -> new ContextProperty[LogicalPlan],
     str -> new ContextProperty[String],
-    loader -> new ContextProperty[PigLoader]
+    loader -> new ContextProperty[PigLoader],
+    columns -> new ContextProperty[Vector[Column]]
     )
 
   //TODO I think we could collapse this with type classes...
@@ -107,6 +111,9 @@ class ContextProperties {
   def getLoader(ctx: ParseTree): PigLoader = hm.get(loader).get.get(ctx)
   def setLoader(ctx: ParseTree, v: PigLoader) { hm.get(loader).get.set(ctx, v) }
 
+  def getColumns(ctx: ParseTree): Vector[Column] = hm.get(columns).get.get(ctx)
+  def setColumns(ctx: ParseTree, v: Vector[Column]) { hm.get(columns).get.set(ctx, v) }
+  def addColumn(ctx: ParseTree, v: Column) = setColumns(ctx, getColumns(ctx) :+ v)
 }
 
 class PigLogicalPlanBuilderListener extends PigRomanceBaseListener {
@@ -146,8 +153,19 @@ class PigLogicalPlanBuilderListener extends PigRomanceBaseListener {
   }
 
   override def exitCommandInnerForeach(ctx: PigRomanceParser.CommandInnerForeachContext) {
-    //TODO need to get the transformations
-    props.setLp(ctx.getParent, Foreach(props.getLp(ctx.foreach), Vector(IdentityColumn())))
+    props.setLp(ctx.getParent, Foreach(props.getLp(ctx.foreach), Columns(props.getColumns(ctx.foreach))))
+  }
+
+  override def enterColumn_transformations(ctx: PigRomanceParser.Column_transformationsContext) {
+    props.setColumns(ctx, Vector())
+  }
+
+  override def exitColumn_transformations(ctx: PigRomanceParser.Column_transformationsContext) {
+    props.setColumns(ctx.getParent, props.getColumns(ctx))
+  }
+
+  override def  exitColumnExpressionStar(ctx: PigRomanceParser.ColumnExpressionStarContext) {
+    props.addColumn(ctx.getParent, IdentityColumn())
   }
 
   override def exitQuoted_path(ctx: PigRomanceParser.Quoted_pathContext) {
@@ -180,6 +198,11 @@ class PigLogicalPlanBuilderListener extends PigRomanceBaseListener {
   override def exitIdentifier(ctx: PigRomanceParser.IdentifierContext) {
     props.setStr(ctx, ctx.IDENTIFIER.getText)
   }
+
+  override def exitShellDescribe(ctx: PigRomanceParser.ShellDescribeContext) {
+    //TODO cleaner printing, also say what we are printing
+    println(props.getLp(ctx.describe).columns)
+  }
 }
 
 case class RelationIdentifier(id: String)
@@ -191,7 +214,6 @@ case class TextLoader extends PigLoader {
   override val getSchema = PigTuple(None, Vector(PigString(None)))
 }
 
-// PIG SCHEMA
 //TODO we would like to implement all of this in such a way that we don't have the n^2 explosion that pig has...
 sealed abstract class PigSchema(val name: Option[String])
 sealed abstract class PigNumber(override val name: Option[String]) extends PigSchema(name)
@@ -201,14 +223,16 @@ case class PigFloat(override val name: Option[String]) extends PigNumber(name)
 case class PigDouble(override val name: Option[String]) extends PigNumber(name)
 case class PigString(override val name: Option[String]) extends PigSchema(name)
 case class PigByteArray(override val name: Option[String]) extends PigSchema(name)
-case class PigTuple(override val name: Option[String], columns: Vector[PigSchema]) extends PigSchema(name) {
+//TODO is this the right way to do this? Can't be pattern matched on, can it?
+sealed abstract class PigFlattenable(override val name: Option[String]) extends PigSchema(name)
+case class PigTuple(override val name: Option[String], columns: Vector[PigSchema]) extends PigFlattenable(name) {
   require(
     {val names = columns flatMap { _.name }
     names.size == names.toSet.size},
     "No names in PigTuple can be repeated!"
   )
 }
-case class PigBag(override val name: Option[String], rows: PigTuple) extends PigSchema(name)
+case class PigBag(override val name: Option[String], rows: PigTuple) extends PigFlattenable(name)
 case class PigMap(override val name: Option[String], values: PigTuple) extends PigSchema(name)
 
 sealed trait LogicalPlan {
@@ -221,33 +245,72 @@ sealed abstract class LogicalPlanRelation extends LogicalPlan
 case class Load(location: String, loader: PigLoader) extends LogicalPlanRelation {
   override val columns = loader.getSchema
 }
-case class Foreach(plan: LogicalPlan, transformations: Vector[Column]) extends LogicalPlanRelation {
+case class Foreach(plan: LogicalPlan, transformations: Columns) extends LogicalPlanRelation {
   // Note that this is a bit of a departure from Pig. This means that if rel A has type a,b then
   // B = foreach A generate *,*; in old pig makes B type a,b,a,b whereas in this it'd be (a,b), (a,b)
   // which seems more principled. We can inject a flatten if this is too annoying but the naming can get weird.
-  override val columns = PigTuple(None, transformations map { _(plan) })
+  override val columns = transformations(plan.columns)
 }
 case class Dump(plan: LogicalPlan) extends Executable(plan)
 case class Store(plan: LogicalPlan) extends Executable(plan)
 
-sealed abstract class Column extends (LogicalPlan => PigSchema)
-case class IdentityColumn extends Column {
-  override def apply(plan: LogicalPlan) = plan.columns
-}
-case class ByNameSelector(name: String) extends Column {
-  override def apply(plan: LogicalPlan) =
-    plan.columns.columns find { _.name.exists { _ == name } } match {
-      case Some(schema) => schema
-      case None => throw new IllegalStateException("There is no column with the requested name: " + name)
+//TODO I'm not sure if this is the right way to do this, as it doesn't really make doing a flatten easy, as well as
+// expressing columns that depend on results of other columns
+case class Columns(columns: Vector[Column]) {
+  private def merge(left: Option[PigTuple], right: PigSchema): PigTuple =
+    left match {
+      case Some(PigTuple(name, columns)) => PigTuple(name, columns :+ right)
+      case None => PigTuple(None, Vector(right))
     }
-}
-case class PositionalSelector(index: Int) extends Column {
-  override def apply(plan: LogicalPlan) =
-    Try(plan.columns.columns(index)) match {
-      case Success(schema) => schema
-      case Failure(_) => throw new IllegalStateException("There is no column at the given index: " + index)
+
+  def apply(schema: PigSchema): PigTuple = {
+    val start: Option[PigTuple] = None
+    columns.foldLeft(start) { (cum, col) =>
+      Some(col match {
+        case IdentityColumn() => merge(cum, schema)
+        case ByNameSelector(name) =>
+          merge(cum, schema match {
+            case PigTuple(_, columns) =>
+              columns find { _.name.exists { _ == name } } match {
+                case Some(s) => s
+                case None => throw new IllegalStateException("There is no column with the requested name: " + name)
+              }
+            case _: PigBag => throw new UnsupportedOperationException("Bags not supported yet")
+            case _ => throw new IllegalStateException("Cannot select by name on field of type: " + schema.getClass)
+          })
+        case PositionalSelector(index) =>
+          merge(cum, schema match {
+            case PigTuple(_, columns) =>
+              Try(columns(index)) match {
+                case Success(schema) => schema
+                case Failure(_) => throw new IllegalStateException("There is no column at the given index: " + index)
+              }
+            case _: PigBag => throw new UnsupportedOperationException("Bags not supported yet")
+            case _ => throw new IllegalStateException("Cannot select by position on field of type: " + schema.getClass)
+          })
+        case FlattenColumn(dep) =>
+          //TODO yuck
+          (Columns(Vector(dep))(schema).columns.head match {
+            case PigTuple(_, columns) => columns.foldLeft(cum) { (inCum, inSchema) => Some(merge(inCum, inSchema)) }
+            case _: PigBag => throw new UnsupportedOperationException("Bags not supported yet")
+            case _ => throw new IllegalStateException("Cannot flatten type: " + schema.getClass)
+          }) match {
+            case Some(s) => s
+            case None => throw new IllegalStateException("Flattened something empty")
+          }
+      })
+    } match {
+      case Some(s) => s
+      case None => throw new IllegalStateException("Got no schema back!")
     }
+  }
 }
+sealed trait Column
+case class IdentityColumn extends Column
+case class ByNameSelector(name: String) extends Column
+case class PositionalSelector(index: Int) extends Column
+sealed abstract class DependantColumn(dep: Column) extends Column
+case class FlattenColumn(dep: Column) extends DependantColumn(dep)
 
 // The following is a dummy physical plan for testing
 sealed trait PigPhysicalType
