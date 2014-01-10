@@ -272,7 +272,9 @@ tuple : LEFT_PAREN column_transformations RIGHT_PAREN
       ;
 
 //TODO should support bags as well...do we want this to be a keyword?
-flatten : FLATTEN tuple
+//TODO I don't like that this is the same thing as tuple, the problem is that the semantics are slightly different...
+// fix that
+flatten : FLATTEN LEFT_PAREN column_expression RIGHT_PAREN
         ;
 
 column_transform : column_identifier  # ColumnTransformColIdentifier
@@ -283,7 +285,7 @@ column_identifier : identifier           # ColumnIdentifierName
                   | relative_identifier  # ColumnIdentifierPos
                   ;
 
-relative_identifier : DOLLAR integer
+relative_identifier : DOLLAR POSITIVE_INTEGER
                     ;
 
 arithmetic_expression : NEG arithmetic_expression

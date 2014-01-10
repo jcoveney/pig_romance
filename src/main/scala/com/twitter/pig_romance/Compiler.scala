@@ -194,7 +194,7 @@ class PigLogicalPlanBuilderListener extends PigRomanceBaseListener {
   }
 
   override def exitFlatten(ctx: PigRomanceParser.FlattenContext) {
-    props.setColumn(ctx, FlattenColumn(Columns(props.getColumns(ctx.tuple))))
+    props.setColumn(ctx, FlattenColumn(props.getColumn(ctx)))
   }
 
   override def exitQuoted_path(ctx: PigRomanceParser.Quoted_pathContext) {
@@ -246,7 +246,7 @@ class PigLogicalPlanBuilderListener extends PigRomanceBaseListener {
   }
 
   override def exitColumnIdentifierPos(ctx: PigRomanceParser.ColumnIdentifierPosContext) {
-    props.setColumn(ctx.getParent, PositionalSelector(props.getInt(ctx.relative_identifier.integer)))
+    props.setColumn(ctx.getParent, PositionalSelector(ctx.relative_identifier.POSITIVE_INTEGER.getText.toInt))
   }
 
   override def exitInteger(ctx: PigRomanceParser.IntegerContext) {
@@ -266,14 +266,18 @@ case class TextLoader extends PigLoader {
 
 //TODO we would like to implement all of this in such a way that we don't have the n^2 explosion that pig has...
 //TODO pretty printing will make this a lot easier
-sealed abstract class PigSchema(val name: Option[String])
-sealed abstract class PigNumber(override val name: Option[String]) extends PigSchema(name)
-case class PigInt(override val name: Option[String]) extends PigNumber(name)
-case class PigLong(override val name: Option[String]) extends PigNumber(name)
-case class PigFloat(override val name: Option[String]) extends PigNumber(name)
-case class PigDouble(override val name: Option[String]) extends PigNumber(name)
-case class PigString(override val name: Option[String]) extends PigSchema(name)
-case class PigByteArray(override val name: Option[String]) extends PigSchema(name)
+sealed abstract class PigSchema(val name: Option[String]) {
+  def nameStr = name.map { _ + ":" }.getOrElse("")
+}
+sealed abstract class PigPrimitive(override val name: Option[String], typeStr: String) extends PigSchema(name) {
+  override def toString = nameStr + typeStr
+}
+case class PigInt(override val name: Option[String]) extends PigPrimitive(name, "int")
+case class PigLong(override val name: Option[String]) extends PigPrimitive(name, "long")
+case class PigFloat(override val name: Option[String]) extends PigPrimitive(name, "float")
+case class PigDouble(override val name: Option[String]) extends PigPrimitive(name, "double")
+case class PigString(override val name: Option[String]) extends PigPrimitive(name, "string")
+case class PigByteArray(override val name: Option[String]) extends PigPrimitive(name, "bytearray")
 //TODO is this the right way to do this? Can't be pattern matched on, can it?
 sealed abstract class PigFlattenable(override val name: Option[String]) extends PigSchema(name)
 case class PigTuple(override val name: Option[String], columns: Vector[PigSchema]) extends PigFlattenable(name) {
@@ -282,8 +286,11 @@ case class PigTuple(override val name: Option[String], columns: Vector[PigSchema
     names.size == names.toSet.size},
     "No names in a PigTuple can be repeated!"
   )
+  override def toString = nameStr + "tuple(" + columns.mkString(",") + ")"
 }
-case class PigBag(override val name: Option[String], rows: PigTuple) extends PigFlattenable(name)
+case class PigBag(override val name: Option[String], rows: PigTuple) extends PigFlattenable(name) {
+  override def toString = nameStr + "bag{(" + rows.columns.mkString(",") + "})"
+}
 case class PigMap(override val name: Option[String], values: PigTuple) extends PigSchema(name)
 
 sealed trait LogicalPlan {
@@ -388,13 +395,12 @@ sealed trait PhysicalPlan {
   def getData: Iterator[TuplePP]
 }
 object ExecutionPP {
-  def apply(e: Executable): ExecutionPP = {
+  def apply(e: Executable): ExecutionPP =
     e match {
       case Dump(lp) => throw new UnsupportedOperationException("Working on dump")
       case Store(lp) => throw new UnsupportedOperationException("Working on store")
       case Describe(lp) => DescribeEPP(lp.columns)
     }
-  }
 }
 sealed trait ExecutionPP {
   def exec()
