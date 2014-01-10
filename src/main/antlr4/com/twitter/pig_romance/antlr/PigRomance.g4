@@ -83,6 +83,8 @@ MERGE : QUOTE M E R G E QUOTE;
 STORE : S T O R E;
 INTO : I N T O;
 DESCRIBE : D E S C R I B E;
+//TODO should this be a keyword?
+FLATTEN : F L A T T E N;
 
 TRUE : T R U E;
 FALSE : F A L S E;
@@ -250,8 +252,11 @@ relations : nested_command ( COMMA nested_command )*
 foreach : FOREACH nested_command GENERATE column_transformations
         ;
 
-column_transformations : column_expression ( COMMA column_expression )*
+column_transformations : column_expression_realias ( COMMA column_expression_realias )*
                        ;
+
+column_expression_realias : column_expression realias?
+                          ;
 
 column_expression : column_transform       # ColumnExpressionTransform
                   | arithmetic_expression  # ColumnExpressionArithmeticExpr
@@ -259,18 +264,23 @@ column_expression : column_transform       # ColumnExpressionTransform
                   | string_literal         # ColumnExpressionStringLit
                   | tuple                  # ColumnExpressionTuple
                   | MULT                   # ColumnExpressionStar
+                  | flatten                # ColumnExpressionFlatten
                   // TODO need a range selector
                   ;
 
 tuple : LEFT_PAREN column_transformations RIGHT_PAREN
       ;
 
-column_transform : column_identifier realias?
-                 | udf realias?
+//TODO should support bags as well...do we want this to be a keyword?
+flatten : FLATTEN tuple
+        ;
+
+column_transform : column_identifier  # ColumnTransformColIdentifier
+                 | udf                # ColumnTransformUdf
                  ;
 
-column_identifier : identifier
-                  | relative_identifier
+column_identifier : identifier           # ColumnIdentifierName
+                  | relative_identifier  # ColumnIdentifierPos
                   ;
 
 relative_identifier : DOLLAR integer

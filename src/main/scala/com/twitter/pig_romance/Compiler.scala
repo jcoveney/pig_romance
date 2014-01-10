@@ -23,12 +23,22 @@ object Compiler {
     parser.start()
   }
 
-  def compile(input: String): LogicalPlan = {
+  //TODO should probably return an intermediate structure
+  def compile(input: String) {
     val tree = parse(input)
     val walker = new ParseTreeWalker
     val listener = new PigLogicalPlanBuilderListener
     walker.walk(listener, tree)
-    null
+    println("==========")
+    println("TO EXECUTE")
+    println("==========")
+    listener.executions foreach println
+    //TODO note that this will not currently do the memoization or anything like that. My focus is on the logical plan,
+    // but need a dummy local mode for testing.
+    println("==========")
+    println("EXECUTING")
+    println("==========")
+    listener.executions foreach { ExecutionPP(_).exec() }
   }
 }
 
@@ -80,40 +90,47 @@ class ContextProperties {
   case object LP
   case object STR
   case object LOADER
+  case object COLUMN
   case object COLUMNS
-
-  val lp = LP
-  val str = STR
-  val loader = LOADER
-  val columns = COLUMNS
+  case object INT
 
   class NodeMap[K, V]
 
   implicit val i1 = new NodeMap[LP.type, ContextProperty[LogicalPlan]]
   implicit val i2 = new NodeMap[STR.type, ContextProperty[String]]
   implicit val i3 = new NodeMap[LOADER.type, ContextProperty[PigLoader]]
-  implicit val i4 = new NodeMap[COLUMNS.type, ContextProperty[Vector[Column]]]
+  implicit val i4 = new NodeMap[COLUMN.type, ContextProperty[Column]]
+  implicit val i5 = new NodeMap[COLUMNS.type, ContextProperty[Vector[Column]]]
+  implicit val i6 = new NodeMap[INT.type, ContextProperty[Int]]
 
   val hm = HMap[NodeMap](
-    lp -> new ContextProperty[LogicalPlan],
-    str -> new ContextProperty[String],
-    loader -> new ContextProperty[PigLoader],
-    columns -> new ContextProperty[Vector[Column]]
+    LP -> new ContextProperty[LogicalPlan],
+    STR -> new ContextProperty[String],
+    LOADER -> new ContextProperty[PigLoader],
+    COLUMN -> new ContextProperty[Column],
+    COLUMNS -> new ContextProperty[Vector[Column]],
+    INT -> new ContextProperty[Int]
     )
 
   //TODO I think we could collapse this with type classes...
-  def getLp(ctx: ParseTree): LogicalPlan = hm.get(lp).get.get(ctx)
-  def setLp(ctx: ParseTree, v: LogicalPlan) { hm.get(lp).get.set(ctx, v) }
+  def getLp(ctx: ParseTree): LogicalPlan = hm.get(LP).get.get(ctx)
+  def setLp(ctx: ParseTree, v: LogicalPlan) { hm.get(LP).get.set(ctx, v) }
 
-  def getStr(ctx: ParseTree): String = hm.get(str).get.get(ctx)
-  def setStr(ctx: ParseTree, v: String) { hm.get(str).get.set(ctx, v) }
+  def getStr(ctx: ParseTree): String = hm.get(STR).get.get(ctx)
+  def setStr(ctx: ParseTree, v: String) { hm.get(STR).get.set(ctx, v) }
 
-  def getLoader(ctx: ParseTree): PigLoader = hm.get(loader).get.get(ctx)
-  def setLoader(ctx: ParseTree, v: PigLoader) { hm.get(loader).get.set(ctx, v) }
+  def getLoader(ctx: ParseTree): PigLoader = hm.get(LOADER).get.get(ctx)
+  def setLoader(ctx: ParseTree, v: PigLoader) { hm.get(LOADER).get.set(ctx, v) }
 
-  def getColumns(ctx: ParseTree): Vector[Column] = hm.get(columns).get.get(ctx)
-  def setColumns(ctx: ParseTree, v: Vector[Column]) { hm.get(columns).get.set(ctx, v) }
+  def getColumn(ctx: ParseTree): Column = hm.get(COLUMN).get.get(ctx)
+  def setColumn(ctx: ParseTree, v: Column) { hm.get(COLUMN).get.set(ctx, v) }
+
+  def getColumns(ctx: ParseTree): Vector[Column] = hm.get(COLUMNS).get.get(ctx)
+  def setColumns(ctx: ParseTree, v: Vector[Column]) { hm.get(COLUMNS).get.set(ctx, v) }
   def addColumn(ctx: ParseTree, v: Column) = setColumns(ctx, getColumns(ctx) :+ v)
+
+  def getInt(ctx: ParseTree): Int = hm.get(INT).get.get(ctx)
+  def setInt(ctx: ParseTree, v: Int) { hm.get(INT).get.set(ctx, v) }
 }
 
 class PigLogicalPlanBuilderListener extends PigRomanceBaseListener {
@@ -125,10 +142,6 @@ class PigLogicalPlanBuilderListener extends PigRomanceBaseListener {
   override def enterStart(ctx: PigRomanceParser.StartContext) {
     scopes = Scope(None)
     executions.clear()
-  }
-
-  override def exitStart(ctx: PigRomanceParser.StartContext) {
-    println(executions)
   }
 
   override def exitAnywhereCommandInner(ctx: PigRomanceParser.AnywhereCommandInnerContext) {
@@ -164,8 +177,24 @@ class PigLogicalPlanBuilderListener extends PigRomanceBaseListener {
     props.setColumns(ctx.getParent, props.getColumns(ctx))
   }
 
-  override def  exitColumnExpressionStar(ctx: PigRomanceParser.ColumnExpressionStarContext) {
-    props.addColumn(ctx.getParent, IdentityColumn())
+  override def exitColumn_expression_realias(ctx: PigRomanceParser.Column_expression_realiasContext) {
+    props.addColumn(ctx.getParent, props.getColumn(ctx))
+  }
+
+  override def exitColumnExpressionStar(ctx: PigRomanceParser.ColumnExpressionStarContext) {
+    props.setColumn(ctx.getParent, IdentityColumn())
+  }
+
+  override def exitColumnExpressionTuple(ctx: PigRomanceParser.ColumnExpressionTupleContext) {
+    props.setColumn(ctx.getParent, Columns(props.getColumns(ctx.tuple)))
+  }
+
+  override def exitColumnExpressionFlatten(ctx: PigRomanceParser.ColumnExpressionFlattenContext) {
+    props.setColumn(ctx.getParent, props.getColumn(ctx.flatten))
+  }
+
+  override def exitFlatten(ctx: PigRomanceParser.FlattenContext) {
+    props.setColumn(ctx, FlattenColumn(Columns(props.getColumns(ctx.tuple))))
   }
 
   override def exitQuoted_path(ctx: PigRomanceParser.Quoted_pathContext) {
@@ -201,7 +230,28 @@ class PigLogicalPlanBuilderListener extends PigRomanceBaseListener {
 
   override def exitShellDescribe(ctx: PigRomanceParser.ShellDescribeContext) {
     //TODO cleaner printing, also say what we are printing
-    println(props.getLp(ctx.describe).columns)
+    executions += Describe(props.getLp(ctx.describe))
+  }
+
+  override def exitColumnExpressionTransform(ctx: PigRomanceParser.ColumnExpressionTransformContext) {
+    props.setColumn(ctx.getParent, props.getColumn(ctx))
+  }
+
+  override def exitColumnTransformColIdentifier(ctx: PigRomanceParser.ColumnTransformColIdentifierContext) {
+    props.setColumn(ctx.getParent, props.getColumn(ctx))
+  }
+
+  override def exitColumnIdentifierName(ctx: PigRomanceParser.ColumnIdentifierNameContext) {
+    props.setColumn(ctx.getParent, ByNameSelector(props.getStr(ctx.identifier)))
+  }
+
+  override def exitColumnIdentifierPos(ctx: PigRomanceParser.ColumnIdentifierPosContext) {
+    props.setColumn(ctx.getParent, PositionalSelector(props.getInt(ctx.relative_identifier.integer)))
+  }
+
+  override def exitInteger(ctx: PigRomanceParser.IntegerContext) {
+    val int = ctx.POSITIVE_INTEGER.getText.toInt
+    props.setInt(ctx, if (Option(ctx.NEG).isDefined) -int else int)
   }
 }
 
@@ -215,6 +265,7 @@ case class TextLoader extends PigLoader {
 }
 
 //TODO we would like to implement all of this in such a way that we don't have the n^2 explosion that pig has...
+//TODO pretty printing will make this a lot easier
 sealed abstract class PigSchema(val name: Option[String])
 sealed abstract class PigNumber(override val name: Option[String]) extends PigSchema(name)
 case class PigInt(override val name: Option[String]) extends PigNumber(name)
@@ -229,7 +280,7 @@ case class PigTuple(override val name: Option[String], columns: Vector[PigSchema
   require(
     {val names = columns flatMap { _.name }
     names.size == names.toSet.size},
-    "No names in PigTuple can be repeated!"
+    "No names in a PigTuple can be repeated!"
   )
 }
 case class PigBag(override val name: Option[String], rows: PigTuple) extends PigFlattenable(name)
@@ -238,12 +289,11 @@ case class PigMap(override val name: Option[String], values: PigTuple) extends P
 sealed trait LogicalPlan {
   val columns: PigTuple
 }
-// This represents things like store, dump which need to actually be run.
-sealed abstract class Executable(plan: LogicalPlan)
+
 // TODO also have this require a parent LogicalPlan?
 sealed abstract class LogicalPlanRelation extends LogicalPlan
 case class Load(location: String, loader: PigLoader) extends LogicalPlanRelation {
-  override val colum s = loader.getSchema
+  override val columns = loader.getSchema
 }
 //TODO make sure we can support column pruning
 case class Foreach(plan: LogicalPlan, transformations: Columns) extends LogicalPlanRelation {
@@ -252,12 +302,18 @@ case class Foreach(plan: LogicalPlan, transformations: Columns) extends LogicalP
   // which seems more principled. We can inject a flatten if this is too annoying but the naming can get weird.
   override val columns = transformations(plan.columns)
 }
+
+// This represents things like store, dump which need to actually be run. This ensures that we can control which side
+// effects run before code executes.
+sealed abstract class Executable(plan: LogicalPlan)
 case class Dump(plan: LogicalPlan) extends Executable(plan)
 case class Store(plan: LogicalPlan) extends Executable(plan)
+//TODO ShellExecutable parent?
+case class Describe(plan: LogicalPlan) extends Executable(plan)
 
 //TODO I'm not sure if this is the right way to do this, as it doesn't really make doing a flatten easy, as well as
 // expressing columns that depend on results of other columns
-case class Columns(columns: Vector[Column]) {
+case class Columns(columns: Vector[Column]) extends Column {
   private def merge(left: Option[PigTuple], right: PigSchema): PigTuple =
     left match {
       case Some(PigTuple(name, columns)) => PigTuple(name, columns :+ right)
@@ -299,6 +355,8 @@ case class Columns(columns: Vector[Column]) {
             case Some(s) => s
             case None => throw new IllegalStateException("Flattened something empty")
           }
+        //TODO implement
+        case c: Columns => merge(cum, c(schema))
       })
     } match {
       case Some(s) => s
@@ -306,24 +364,47 @@ case class Columns(columns: Vector[Column]) {
     }
   }
 }
+
 sealed trait Column
 case class IdentityColumn extends Column
-case class ByNameSelectors(name: String) extends Column
+case class ByNameSelector(name: String) extends Column
 case class PositionalSelector(index: Int) extends Column
 sealed abstract class DependantColumn(dep: Column) extends Column
 case class FlattenColumn(dep: Column) extends DependantColumn(dep)
 
 // The following is a dummy physical plan for testing
 sealed trait PigPhysicalType
-sealed trait PPNumber extends PigPhysicalType
-sealed trait PPInt extends PPNumber
-sealed trait PPLong extends PPNumber
-sealed trait PPFloat extends PPNumber
-sealed trait PPDouble extends PPNumber
-sealed trait PPTuple extends PigPhysicalType
-sealed trait PPBag extends PigPhysicalType
-sealed trait PPMap extends PigPhysicalType
+sealed trait NumberPP extends PigPhysicalType
+case class IntPP(v: Int) extends NumberPP
+case class LongPP(v: Long) extends NumberPP
+case class FloatPP(v: Float) extends NumberPP
+case class DoublePP(v: Double) extends NumberPP
+case class StringPP(v: String) extends PigPhysicalType
+case class TuplePP(v: Vector[PigPhysicalType]) extends PigPhysicalType
+case class BagPP(v: Iterator[TuplePP]) extends PigPhysicalType
+case class MapPP(v: Map[String, TuplePP]) extends PigPhysicalType
 
 sealed trait PhysicalPlan {
-  def getData: Iterator[PigTuple]
+  def getData: Iterator[TuplePP]
+}
+object ExecutionPP {
+  def apply(e: Executable): ExecutionPP = {
+    e match {
+      case Dump(lp) => throw new UnsupportedOperationException("Working on dump")
+      case Store(lp) => throw new UnsupportedOperationException("Working on store")
+      case Describe(lp) => DescribeEPP(lp.columns)
+    }
+  }
+}
+sealed trait ExecutionPP {
+  def exec()
+}
+case class LoadPP(location: String) extends PhysicalPlan {
+  override def getData = Source.fromFile(location).getLines map { l => TuplePP(Vector(StringPP(l))) }
+}
+case class DumpEPP(dep: PhysicalPlan) extends ExecutionPP {
+  override def exec() { dep.getData foreach println }
+}
+case class DescribeEPP(s: PigSchema) extends ExecutionPP {
+  override def exec() { println(s) }
 }
