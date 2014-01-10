@@ -77,22 +77,22 @@ class Scope(parent: Option[Scope]) {
 }
 
 class ContextProperties {
-  case class LP
-  case class STR
-  case class LOADER
-  case class COLUMNS
+  case object LP
+  case object STR
+  case object LOADER
+  case object COLUMNS
 
-  val lp = LP()
-  val str = STR()
-  val loader = LOADER()
-  val columns = COLUMNS()
+  val lp = LP
+  val str = STR
+  val loader = LOADER
+  val columns = COLUMNS
 
   class NodeMap[K, V]
 
-  implicit val i1 = new NodeMap[LP, ContextProperty[LogicalPlan]]
-  implicit val i2 = new NodeMap[STR, ContextProperty[String]]
-  implicit val i3 = new NodeMap[LOADER, ContextProperty[PigLoader]]
-  implicit val i4 = new NodeMap[COLUMNS, ContextProperty[Vector[Column]]]
+  implicit val i1 = new NodeMap[LP.type, ContextProperty[LogicalPlan]]
+  implicit val i2 = new NodeMap[STR.type, ContextProperty[String]]
+  implicit val i3 = new NodeMap[LOADER.type, ContextProperty[PigLoader]]
+  implicit val i4 = new NodeMap[COLUMNS.type, ContextProperty[Vector[Column]]]
 
   val hm = HMap[NodeMap](
     lp -> new ContextProperty[LogicalPlan],
@@ -243,8 +243,9 @@ sealed abstract class Executable(plan: LogicalPlan)
 // TODO also have this require a parent LogicalPlan?
 sealed abstract class LogicalPlanRelation extends LogicalPlan
 case class Load(location: String, loader: PigLoader) extends LogicalPlanRelation {
-  override val columns = loader.getSchema
+  override val colum s = loader.getSchema
 }
+//TODO make sure we can support column pruning
 case class Foreach(plan: LogicalPlan, transformations: Columns) extends LogicalPlanRelation {
   // Note that this is a bit of a departure from Pig. This means that if rel A has type a,b then
   // B = foreach A generate *,*; in old pig makes B type a,b,a,b whereas in this it'd be (a,b), (a,b)
@@ -307,7 +308,7 @@ case class Columns(columns: Vector[Column]) {
 }
 sealed trait Column
 case class IdentityColumn extends Column
-case class ByNameSelector(name: String) extends Column
+case class ByNameSelectors(name: String) extends Column
 case class PositionalSelector(index: Int) extends Column
 sealed abstract class DependantColumn(dep: Column) extends Column
 case class FlattenColumn(dep: Column) extends DependantColumn(dep)
