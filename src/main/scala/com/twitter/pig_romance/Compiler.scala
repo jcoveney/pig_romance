@@ -30,15 +30,20 @@ object Compiler {
     val listener = new PigLogicalPlanBuilderListener
     walker.walk(listener, tree)
     println("==========")
-    println("TO EXECUTE")
+    println("LOGICAL")
     println("==========")
     listener.executions foreach println
     //TODO note that this will not currently do the memoization or anything like that. My focus is on the logical plan,
     // but need a dummy local mode for testing.
     println("==========")
+    println("PHYSICAL")
+    println("==========")
+    val physicals = listener.executions map { ExecutionPP(_) }
+    physicals foreach println
+    println("==========")
     println("EXECUTING")
     println("==========")
-    listener.executions foreach { ExecutionPP(_).exec() }
+    physicals foreach { _.exec() }
   }
 }
 
@@ -286,6 +291,12 @@ case class PigTuple(override val name: Option[String], columns: Vector[PigSchema
     names.size == names.toSet.size},
     "No names in a PigTuple can be repeated!"
   )
+  def getFieldIndex(name: String): Int =
+    columns.zipWithIndex.find { _._1.name exists { _ == name} } match {
+      case Some((_, i)) => i
+      case None => throw new IllegalArgumentException("Could not find field name: " + name)
+    }
+
   override def toString = nameStr + "tuple(" + columns.mkString(",") + ")"
 }
 case class PigBag(override val name: Option[String], rows: PigTuple) extends PigFlattenable(name) {
@@ -327,7 +338,8 @@ case class Columns(columns: Vector[Column]) extends Column {
       case None => PigTuple(None, Vector(right))
     }
 
-  def apply(schema: PigSchema): PigTuple = {
+  //TODO is this ever applied to something that isn't a PigTuple? Esp. given it returns a PigTuple?
+  def apply(schema: PigFlattenable): PigTuple = {
     val start: Option[PigTuple] = None
     columns.foldLeft(start) { (cum, col) =>
       Some(col match {
@@ -340,7 +352,6 @@ case class Columns(columns: Vector[Column]) extends Column {
                 case None => throw new IllegalStateException("There is no column with the requested name: " + name)
               }
             case _: PigBag => throw new UnsupportedOperationException("Bags not supported yet")
-            case _ => throw new IllegalStateException("Cannot select by name on field of type: " + schema.getClass)
           })
         case PositionalSelector(index) =>
           merge(cum, schema match {
@@ -350,14 +361,13 @@ case class Columns(columns: Vector[Column]) extends Column {
                 case Failure(_) => throw new IllegalStateException("There is no column at the given index: " + index)
               }
             case _: PigBag => throw new UnsupportedOperationException("Bags not supported yet")
-            case _ => throw new IllegalStateException("Cannot select by position on field of type: " + schema.getClass)
           })
         case FlattenColumn(dep) =>
           //TODO yuck
           (Columns(Vector(dep))(schema).columns.head match {
             case PigTuple(_, columns) => columns.foldLeft(cum) { (inCum, inSchema) => Some(merge(inCum, inSchema)) }
             case _: PigBag => throw new UnsupportedOperationException("Bags not supported yet")
-            case _ => throw new IllegalStateException("Cannot flatten type: " + schema.getClass)
+            case _ => throw new IllegalStateException("Should have been a tuple or a bag")
           }) match {
             case Some(s) => s
             case None => throw new IllegalStateException("Flattened something empty")
@@ -381,23 +391,38 @@ case class FlattenColumn(dep: Column) extends DependantColumn(dep)
 
 // The following is a dummy physical plan for testing
 sealed trait PigPhysicalType
-sealed trait NumberPP extends PigPhysicalType
-case class IntPP(v: Int) extends NumberPP
-case class LongPP(v: Long) extends NumberPP
-case class FloatPP(v: Float) extends NumberPP
-case class DoublePP(v: Double) extends NumberPP
-case class StringPP(v: String) extends PigPhysicalType
-case class TuplePP(v: Vector[PigPhysicalType]) extends PigPhysicalType
+sealed abstract class PrimitivePP[T](v: T) extends PigPhysicalType  {
+  override def toString = v.toString
+}
+case class IntPP(v: Int) extends PrimitivePP[Int](v)
+case class LongPP(v: Long) extends PrimitivePP[Long](v)
+case class FloatPP(v: Float) extends PrimitivePP[Float](v)
+case class DoublePP(v: Double) extends PrimitivePP[Double](v)
+case class StringPP(v: String) extends PrimitivePP[String](v)
+case class ByteArrayPP(v: Array[Byte]) extends PrimitivePP[Array[Byte]](v)
+case class TuplePP(val v: Vector[PigPhysicalType]) extends PigPhysicalType {
+  def apply(index: Int): PigPhysicalType = v(index)
+  override def toString = "(" + v.mkString(",") + ")"
+}
 case class BagPP(v: Iterator[TuplePP]) extends PigPhysicalType
 case class MapPP(v: Map[String, TuplePP]) extends PigPhysicalType
 
+object PhysicalPlan {
+  def apply(lp: LogicalPlan): PhysicalPlan =
+    lp match {
+      //TODO shouldn't ignore loader...
+      case Load(location, loader) => LoadPP(location)
+      case Foreach(plan, transformations) => ForeachPP(PhysicalPlan(plan), ColumnsPP(transformations, plan.columns))
+      case _ => throw new UnsupportedOperationException("NOT SUPPORTED YET!")
+    }
+}
 sealed trait PhysicalPlan {
   def getData: Iterator[TuplePP]
 }
 object ExecutionPP {
   def apply(e: Executable): ExecutionPP =
     e match {
-      case Dump(lp) => throw new UnsupportedOperationException("Working on dump")
+      case Dump(lp) => DumpEPP(PhysicalPlan(lp))
       case Store(lp) => throw new UnsupportedOperationException("Working on store")
       case Describe(lp) => DescribeEPP(lp.columns)
     }
@@ -408,9 +433,58 @@ sealed trait ExecutionPP {
 case class LoadPP(location: String) extends PhysicalPlan {
   override def getData = Source.fromFile(location).getLines map { l => TuplePP(Vector(StringPP(l))) }
 }
+case class ForeachPP(dep: PhysicalPlan, selector: ColumnsPP) extends PhysicalPlan {
+  override def getData = dep.getData map { selector(_) }
+}
 case class DumpEPP(dep: PhysicalPlan) extends ExecutionPP {
   override def exec() { dep.getData foreach println }
 }
 case class DescribeEPP(s: PigSchema) extends ExecutionPP {
   override def exec() { println(s) }
+}
+
+object ColumnsPP {
+  def convColumn(column: Column, tupleSchema: PigTuple, cum: ColumnsPP = ColumnsPP(Vector())): ColumnsPP =
+    column match {
+      case IdentityColumn() => ColumnsPP(cum.columns :+ IdentityColumnPP())
+      case ByNameSelector(name) => ColumnsPP(cum.columns :+ PositionalSelectorPP(tupleSchema.getFieldIndex(name)))
+      case PositionalSelector(index) => ColumnsPP(cum.columns :+ PositionalSelectorPP(index))
+      case FlattenColumn(dep: Columns) => ColumnsPP(cum.columns ++ ColumnsPP(dep, tupleSchema).columns)
+      //TODO yuck
+      case FlattenColumn(dep) => ColumnsPP(cum.columns :+ FlattenPP(convColumn(dep, tupleSchema).columns.head))
+      //TODO is this possible? Can Columns be nested? if not, remove it from case class. If so, implement.
+      case col: Columns => ColumnsPP(cum.columns :+ TupleColumnPP(ColumnsPP(col, tupleSchema)))
+    }
+
+  def apply(columns: Columns, tupleSchema: PigTuple): ColumnsPP = {
+    columns.columns.foldLeft(ColumnsPP(Vector())) { (cum, col) => convColumn(col, tupleSchema, cum) }
+  }
+}
+case class ColumnsPP(val columns: Vector[ColumnPP]) {
+  def apply(tuple: TuplePP): TuplePP = columns.foldLeft(TuplePP(Vector())) { (cum, col) => col(tuple, cum) }
+}
+//TODO use this pattern above in the logical plan!
+sealed trait ColumnPP {
+  def apply(baseTuple: TuplePP, outputTuple: TuplePP = TuplePP(Vector())): TuplePP
+}
+// At the physical layer we do not need a by-name selector, we can do it all positionally.
+case class PositionalSelectorPP(index: Int) extends ColumnPP {
+  override def apply(baseTuple: TuplePP, outputTuple: TuplePP) = TuplePP(outputTuple.v :+ baseTuple(index))
+}
+case class IdentityColumnPP() extends ColumnPP {
+  override def apply(baseTuple: TuplePP, outputTuple: TuplePP) = TuplePP(outputTuple.v :+ baseTuple)
+}
+case class TupleColumnPP(cols: ColumnsPP) extends ColumnPP {
+  override def apply(baseTuple: TuplePP, outputTuple: TuplePP) = TuplePP(outputTuple.v :+  cols(baseTuple))
+}
+case class FlattenPP(col: ColumnPP) extends ColumnPP {
+  override def apply(baseTuple: TuplePP, outputTuple: TuplePP) = {
+    val inter = col(baseTuple).v
+    require(inter.size == 1, "FlattenPP invoked on something which doesn't return a single tuple")
+    inter.head match {
+      case TuplePP(v) => TuplePP(outputTuple.v ++ v)
+      case _ => throw new IllegalStateException("FlattenPP invoked on something which doesn't return a tuple")
+    }
+  }
+
 }
