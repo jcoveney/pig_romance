@@ -217,7 +217,7 @@ command_inner : foreach     # CommandInnerForeach
 distinct : DISTINCT nested_command
          ;
 
-group : GROUP commands_by_key
+group : GROUP nested_command BY column_transformations
       ;
 
 join : JOIN commands_on_key
@@ -231,9 +231,6 @@ dump : DUMP nested_command
 
 store : STORE nested_command INTO quoted_path using?
       ;
-
-commands_by_key : relations BY column_transformations
-                ;
 
 commands_on_key : relations ON column_transformations join_qualifier?
                 ;

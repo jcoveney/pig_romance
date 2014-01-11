@@ -174,6 +174,10 @@ class PigLogicalPlanBuilderListener extends PigRomanceBaseListener {
     props.setLp(ctx.getParent, Foreach(props.getLp(ctx.foreach), Columns(props.getColumns(ctx.foreach))))
   }
 
+  override def exitCommandInnerGroup(ctx: PigRomanceParser.CommandInnerGroupContext) {
+    props.setLp(ctx.getParent, Group(props.getLp(ctx.group), Columns(props.getColumns(ctx.group))))
+  }
+
   override def enterColumn_transformations(ctx: PigRomanceParser.Column_transformationsContext) {
     props.setColumns(ctx, Vector())
   }
@@ -285,7 +289,7 @@ case class PigString(override val name: Option[String]) extends PigPrimitive(nam
 case class PigByteArray(override val name: Option[String]) extends PigPrimitive(name, "bytearray")
 //TODO is this the right way to do this? Can't be pattern matched on, can it?
 sealed abstract class PigFlattenable(override val name: Option[String]) extends PigSchema(name)
-case class PigTuple(override val name: Option[String], columns: Vector[PigSchema]) extends PigFlattenable(name) {
+case class PigTuple(override val name: Option[String], val columns: Vector[PigSchema]) extends PigFlattenable(name) {
   require(
     {val names = columns flatMap { _.name }
     names.size == names.toSet.size},
@@ -319,6 +323,11 @@ case class Foreach(plan: LogicalPlan, transformations: Columns) extends LogicalP
   // B = foreach A generate *,*; in old pig makes B type a,b,a,b whereas in this it'd be (a,b), (a,b)
   // which seems more principled. We can inject a flatten if this is too annoying but the naming can get weird.
   override val columns = transformations(plan.columns)
+}
+case class Group(plan: LogicalPlan, keyfunc: Columns) extends LogicalPlanRelation {
+  val planSchema = plan.columns
+  val key = PigTuple(Some("key"), keyfunc(planSchema).columns)
+  override val columns = PigTuple(None, Vector(key, PigBag(Some("rows"), plan.columns)))
 }
 
 // This represents things like store, dump which need to actually be run. This ensures that we can control which side
@@ -404,7 +413,9 @@ case class TuplePP(val v: Vector[PigPhysicalType]) extends PigPhysicalType {
   def apply(index: Int): PigPhysicalType = v(index)
   override def toString = "(" + v.mkString(",") + ")"
 }
-case class BagPP(v: Iterator[TuplePP]) extends PigPhysicalType
+case class BagPP(v: Iterator[TuplePP]) extends PigPhysicalType {
+  override def toString = "{" + v.mkString(",") + "}"
+}
 case class MapPP(v: Map[String, TuplePP]) extends PigPhysicalType
 
 object PhysicalPlan {
@@ -413,6 +424,7 @@ object PhysicalPlan {
       //TODO shouldn't ignore loader...
       case Load(location, loader) => LoadPP(location)
       case Foreach(plan, transformations) => ForeachPP(PhysicalPlan(plan), ColumnsPP(transformations, plan.columns))
+      case Group(plan, keys) => GroupPP(PhysicalPlan(plan), ColumnsPP(keys, plan.columns))
       case _ => throw new UnsupportedOperationException("NOT SUPPORTED YET!")
     }
 }
@@ -435,6 +447,17 @@ case class LoadPP(location: String) extends PhysicalPlan {
 }
 case class ForeachPP(dep: PhysicalPlan, selector: ColumnsPP) extends PhysicalPlan {
   override def getData = dep.getData map { selector(_) }
+}
+case class GroupPP(dep: PhysicalPlan, selector: ColumnsPP) extends PhysicalPlan {
+  // TODO this is particularly terrible
+  override def getData =
+    dep.getData.foldLeft(Map.empty[TuplePP, Vector[TuplePP]]) { (cum, tup) =>
+      val key = selector(tup)
+      cum.get(key) match {
+        case Some(v) => cum + (key -> (v :+ tup))
+        case None => cum + (key -> Vector(tup))
+      }
+    }.map { case (k, v) => TuplePP(Vector(k, BagPP(v.iterator))) }.iterator
 }
 case class DumpEPP(dep: PhysicalPlan) extends ExecutionPP {
   override def exec() { dep.getData foreach println }
