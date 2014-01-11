@@ -159,16 +159,16 @@ start : global_command* EOF
 relation : identifier EQUALS
          ;
 
+global_command : anywhere_command
+               | shell_command SEMICOLON
+               | execution_command SEMICOLON
+               ;
+
 //TODO should we support dump and whatnot within nested_blocks? Probably
 anywhere_command : relation? command_inner SEMICOLON    # AnywhereCommandInner
                  //| relation? command_outer SEMICOLON
                  | nested_block                         # AnywhereNestedBlock
                  ;
-
-global_command : anywhere_command
-               | shell_command SEMICOLON
-               | execution_command SEMICOLON
-               ;
 
 nested_block_command : anywhere_command
                      | make_global SEMICOLON

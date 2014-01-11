@@ -293,7 +293,7 @@ case class PigTuple(override val name: Option[String], columns: Vector[PigSchema
   )
   def getFieldIndex(name: String): Int =
     columns.zipWithIndex.find { _._1.name exists { _ == name} } match {
-      case Some((_, i)) => i
+      case Some(v) => v._2
       case None => throw new IllegalArgumentException("Could not find field name: " + name)
     }
 
@@ -325,7 +325,7 @@ case class Foreach(plan: LogicalPlan, transformations: Columns) extends LogicalP
 // effects run before code executes.
 sealed abstract class Executable(plan: LogicalPlan)
 case class Dump(plan: LogicalPlan) extends Executable(plan)
-case class Store(plan: LogicalPlan) extends Executable(plan)
+case class Store(into: String, plan: LogicalPlan) extends Executable(plan)
 //TODO ShellExecutable parent?
 case class Describe(plan: LogicalPlan) extends Executable(plan)
 
@@ -423,7 +423,7 @@ object ExecutionPP {
   def apply(e: Executable): ExecutionPP =
     e match {
       case Dump(lp) => DumpEPP(PhysicalPlan(lp))
-      case Store(lp) => throw new UnsupportedOperationException("Working on store")
+      case Store(into, lp) => throw new UnsupportedOperationException("Working on store")
       case Describe(lp) => DescribeEPP(lp.columns)
     }
 }
@@ -486,5 +486,4 @@ case class FlattenPP(col: ColumnPP) extends ColumnPP {
       case _ => throw new IllegalStateException("FlattenPP invoked on something which doesn't return a tuple")
     }
   }
-
 }
